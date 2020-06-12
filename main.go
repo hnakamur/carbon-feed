@@ -16,115 +16,117 @@ import (
 )
 
 type Metric struct {
-	itemPrefix string
-	timestamp  int64
-	value      float64
+	item      string
+	timestamp int64
+	value     float64
 }
 
 type Sender struct {
-	svID    string
-	dest    string
-	timeout time.Duration
-	rnd     *rand.Rand
+	svID       string
+	carbonDest string
+	relayDest  string
+	timeout    time.Duration
+	rnd        *rand.Rand
 }
 
 func main() {
-	dest := flag.String("dest", "127.0.0.1:2003", "destination")
+	carbonDest := flag.String("carbon-dest", "127.0.0.1:12003", "go-carbon destination")
+	relayDest := flag.String("relay-dest", "127.0.0.1:2003", "carbon-relay-ng destination")
 	timeout := flag.Duration("timeout", 10*time.Second, "timeout")
 	svCount := flag.Int("sv-count", 30, "source server count")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	if err := run(*dest, *timeout, *svCount); err != nil {
+	if err := run(*carbonDest, *relayDest, *timeout, *svCount); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(dest string, timeout time.Duration, svCount int) error {
-	metricC := make(chan Metric, svCount)
+func run(carbonDest, relayDest string, timeout time.Duration, svCount int) error {
 	var g errgroup.Group
 	for i := 0; i < svCount; i++ {
 		svID := fmt.Sprintf("sv%02d", i)
 		g.Go(func() error {
-			s := newSender(svID, dest, timeout)
-			return s.run(metricC)
+			s := newSender(svID, carbonDest, relayDest, timeout)
+			return s.run()
 		})
 	}
-	go func() {
-		for {
-			total := float64(0)
-			var t0 int64
-			for i := 0; i < svCount; i++ {
-				m := <-metricC
-				if i == 0 {
-					t0 = m.timestamp
-				} else if m.timestamp != t0 {
-					log.Printf("timestamp should match, t0=%d, t[%d]=%d", t0, i, m.timestamp)
-				}
-				total += m.value
-			}
-			log.Printf("sent data timestamp=%s, total=%s",
-				time.Unix(t0, 0).Format("2006-01-02T15:04:05Z"),
-				strconv.FormatFloat(total, 'f', -1, 64))
-		}
-	}()
 	return g.Wait()
 }
 
-func newSender(svID, dest string, timeout time.Duration) *Sender {
+func newSender(svID, carbonDest, relayDest string, timeout time.Duration) *Sender {
 	return &Sender{
-		svID:    svID,
-		dest:    dest,
-		timeout: timeout,
-		rnd:     rand.New(rand.NewSource(newRandSeed())),
+		svID:       svID,
+		carbonDest: carbonDest,
+		relayDest:  relayDest,
+		timeout:    timeout,
+		rnd:        rand.New(rand.NewSource(newRandSeed())),
 	}
 }
 
-func (s *Sender) run(metricC chan<- Metric) error {
+func (s *Sender) run() error {
 	for {
 		now := time.Now()
 		targetTime := now.Truncate(time.Minute)
 		durTillNextMin := targetTime.Add(time.Minute).Sub(now)
 		time.Sleep(durTillNextMin)
 
-		m := genRandMetric(targetTime, s.rnd)
-		if err := s.send(m); err != nil {
+		metrics := genRandMetrics(targetTime, s.svID, s.rnd)
+		data := encodeMetrics(metrics)
+		var g errgroup.Group
+		g.Go(func() error {
+			return s.send(s.carbonDest, data)
+		})
+		g.Go(func() error {
+			return s.send(s.relayDest, data)
+		})
+		if err := g.Wait(); err != nil {
 			return err
 		}
-		metricC <- *m
 	}
 	return nil
 }
 
-func (s *Sender) send(m *Metric) error {
+func genRandMetrics(t time.Time, svID string, rnd *rand.Rand) []Metric {
+	tstamp := t.Unix()
+
+	const itemCount = 100
+	metrics := make([]Metric, itemCount)
+	for i := 0; i < itemCount; i++ {
+		metrics[i] = Metric{
+			item:      fmt.Sprintf("test.item%04d.%s", i, svID),
+			value:     float64(rnd.Intn(100)),
+			timestamp: tstamp,
+		}
+	}
+	return metrics
+}
+
+func encodeMetrics(metrics []Metric) []byte {
+	var b strings.Builder
+	for _, m := range metrics {
+		fmt.Fprintf(&b, "%s %s %d\n",
+			m.item,
+			strconv.FormatFloat(m.value, 'f', -1, 64),
+			m.timestamp)
+	}
+	return []byte(b.String())
+}
+
+func (s *Sender) send(dest string, data []byte) error {
 	d := net.Dialer{Timeout: s.timeout}
-	conn, err := d.Dial("tcp", s.dest)
+	conn, err := d.Dial("tcp", dest)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s%s %s %d\n",
-		m.itemPrefix,
-		s.svID,
-		strconv.FormatFloat(m.value, 'f', -1, 64),
-		m.timestamp)
-	data := []byte(b.String())
 	if _, err = conn.Write(data); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func genRandMetric(t time.Time, rnd *rand.Rand) *Metric {
-	return &Metric{
-		itemPrefix: "test.foo.",
-		value:      float64(rnd.Intn(100)),
-		timestamp:  t.Unix(),
-	}
 }
 
 func newRandSeed() int64 {
