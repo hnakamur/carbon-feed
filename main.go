@@ -84,10 +84,11 @@ func newSender(svID, dest string, timeout time.Duration) *Sender {
 func (s *Sender) run(metricC chan<- Metric) error {
 	for {
 		now := time.Now()
-		durTillNextMin := now.Truncate(time.Minute).Add(time.Minute).Sub(now)
+		targetTime := now.Truncate(time.Minute)
+		durTillNextMin := targetTime.Add(time.Minute).Sub(now)
 		time.Sleep(durTillNextMin)
 
-		m := genRandMetric(s.rnd)
+		m := genRandMetric(targetTime, s.rnd)
 		if err := s.send(m); err != nil {
 			return err
 		}
@@ -118,11 +119,11 @@ func (s *Sender) send(m *Metric) error {
 	return nil
 }
 
-func genRandMetric(rnd *rand.Rand) *Metric {
+func genRandMetric(t time.Time, rnd *rand.Rand) *Metric {
 	return &Metric{
 		itemPrefix: "test.foo.",
 		value:      float64(rnd.Intn(100)),
-		timestamp:  time.Now().Unix(),
+		timestamp:  t.Unix(),
 	}
 }
 
