@@ -42,14 +42,33 @@ func main() {
 }
 
 func run(dest string, timeout time.Duration, svCount int) error {
+	metricC := make(chan Metric, svCount)
 	var g errgroup.Group
 	for i := 0; i < svCount; i++ {
 		svID := fmt.Sprintf("sv%02d", i)
 		g.Go(func() error {
 			s := newSender(svID, dest, timeout)
-			return s.run()
+			return s.run(metricC)
 		})
 	}
+	go func() {
+		for {
+			total := float64(0)
+			var t0 int64
+			for i := 0; i < svCount; i++ {
+				m := <-metricC
+				if i == 0 {
+					t0 = m.timestamp
+				} else if m.timestamp != t0 {
+					log.Printf("timestamp should match, t0=%d, t[%d]=%d", t0, i, m.timestamp)
+				}
+				total += m.value
+			}
+			log.Printf("sent data timestamp=%s, total=%s",
+				time.Unix(t0, 0).Format("2006-01-02T15:04:05Z"),
+				strconv.FormatFloat(total, 'f', -1, 64))
+		}
+	}()
 	return g.Wait()
 }
 
@@ -62,21 +81,22 @@ func newSender(svID, dest string, timeout time.Duration) *Sender {
 	}
 }
 
-func (s *Sender) run() error {
+func (s *Sender) run(metricC chan<- Metric) error {
 	for {
 		now := time.Now()
 		durTillNextMin := now.Truncate(time.Minute).Add(time.Minute).Sub(now)
 		time.Sleep(durTillNextMin)
 
-		metrics := genRandMetrics(s.rnd)
-		if err := s.send(metrics); err != nil {
+		m := genRandMetric(s.rnd)
+		if err := s.send(m); err != nil {
 			return err
 		}
+		metricC <- *m
 	}
 	return nil
 }
 
-func (s *Sender) send(metrics []Metric) error {
+func (s *Sender) send(m *Metric) error {
 	d := net.Dialer{Timeout: s.timeout}
 	conn, err := d.Dial("tcp", s.dest)
 	if err != nil {
@@ -85,29 +105,24 @@ func (s *Sender) send(metrics []Metric) error {
 	defer conn.Close()
 
 	var b strings.Builder
-	for _, m := range metrics {
-		fmt.Fprintf(&b, "%s%s %s %d\n",
-			m.itemPrefix,
-			s.svID,
-			strconv.FormatFloat(m.value, 'f', -1, 64),
-			m.timestamp)
-	}
+	fmt.Fprintf(&b, "%s%s %s %d\n",
+		m.itemPrefix,
+		s.svID,
+		strconv.FormatFloat(m.value, 'f', -1, 64),
+		m.timestamp)
 	data := []byte(b.String())
 	if _, err = conn.Write(data); err != nil {
 		return err
 	}
-	log.Printf("sent data=%s\n", string(data))
 
 	return nil
 }
 
-func genRandMetrics(rnd *rand.Rand) []Metric {
-	return []Metric{
-		{
-			itemPrefix: "test.foo.",
-			value:      float64(rnd.Intn(100)),
-			timestamp:  time.Now().Unix(),
-		},
+func genRandMetric(rnd *rand.Rand) *Metric {
+	return &Metric{
+		itemPrefix: "test.foo.",
+		value:      float64(rnd.Intn(100)),
+		timestamp:  time.Now().Unix(),
 	}
 }
 
