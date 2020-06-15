@@ -23,6 +23,8 @@ type Metric struct {
 
 type Sender struct {
 	svID       string
+	siteCount  int
+	itemCount  int
 	carbonDest string
 	relayDest  string
 	timeout    time.Duration
@@ -34,30 +36,34 @@ func main() {
 	relayDest := flag.String("relay-dest", "127.0.0.1:2003", "carbon-relay-ng destination")
 	timeout := flag.Duration("timeout", 10*time.Second, "timeout")
 	svCount := flag.Int("sv-count", 30, "source server count")
+	siteCount := flag.Int("site-count", 100, "site count")
+	itemCount := flag.Int("item-count", 5, "item count per site")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	if err := run(*carbonDest, *relayDest, *timeout, *svCount); err != nil {
+	if err := run(*carbonDest, *relayDest, *timeout, *svCount, *siteCount, *itemCount); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(carbonDest, relayDest string, timeout time.Duration, svCount int) error {
+func run(carbonDest, relayDest string, timeout time.Duration, svCount, siteCount, itemCount int) error {
 	var g errgroup.Group
 	for i := 0; i < svCount; i++ {
 		svID := fmt.Sprintf("sv%02d", i)
 		g.Go(func() error {
-			s := newSender(svID, carbonDest, relayDest, timeout)
+			s := newSender(svID, siteCount, itemCount, carbonDest, relayDest, timeout)
 			return s.run()
 		})
 	}
 	return g.Wait()
 }
 
-func newSender(svID, carbonDest, relayDest string, timeout time.Duration) *Sender {
+func newSender(svID string, siteCount, itemCount int, carbonDest, relayDest string, timeout time.Duration) *Sender {
 	return &Sender{
 		svID:       svID,
+		siteCount:  siteCount,
+		itemCount:  itemCount,
 		carbonDest: carbonDest,
 		relayDest:  relayDest,
 		timeout:    timeout,
@@ -72,8 +78,9 @@ func (s *Sender) run() error {
 		durTillNextMin := targetTime.Add(time.Minute).Sub(now)
 		time.Sleep(durTillNextMin)
 
-		metrics := genRandMetrics(targetTime, s.svID, s.rnd)
+		metrics := genRandMetrics(targetTime, s.siteCount, s.itemCount, s.svID, s.rnd)
 		data := encodeMetrics(metrics)
+		//log.Printf("data=%s", data)
 		var g errgroup.Group
 		g.Go(func() error {
 			return s.send(s.carbonDest, data)
@@ -88,16 +95,17 @@ func (s *Sender) run() error {
 	return nil
 }
 
-func genRandMetrics(t time.Time, svID string, rnd *rand.Rand) []Metric {
+func genRandMetrics(t time.Time, siteCount, itemCount int, svID string, rnd *rand.Rand) []Metric {
 	tstamp := t.Unix()
 
-	const itemCount = 100
-	metrics := make([]Metric, itemCount)
-	for i := 0; i < itemCount; i++ {
-		metrics[i] = Metric{
-			item:      fmt.Sprintf("test.item%04d.%s", i, svID),
-			value:     float64(rnd.Intn(100)),
-			timestamp: tstamp,
+	metrics := make([]Metric, siteCount*itemCount)
+	for i := 0; i < siteCount; i++ {
+		for j := 0; j < itemCount; j++ {
+			metrics[i*itemCount+j] = Metric{
+				item:      fmt.Sprintf("site%04d.item%02d.%s", i, j, svID),
+				value:     float64(rnd.Intn(100)),
+				timestamp: tstamp,
+			}
 		}
 	}
 	return metrics
